@@ -1,0 +1,17 @@
+# Python 字节码与缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境目录
+.venv/
+env/
+
+# 仿真生成的视频与大量数据日志
+data/
+*.mp4
+*.avi
+
+# VSCode 个人配置
+.vscode/
+.DS_Store

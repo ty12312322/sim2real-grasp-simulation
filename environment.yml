@@ -1,0 +1,15 @@
+name: sim2real
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pybullet     # <--- 把 pybullet 移到这里！让 Conda 直接下载预编译二进制包，避开 C++ 编译
+  - numpy
+  - matplotlib
+  - scipy
+  - pip
+  - pip:
+      - optuna
+      - stable-baselines3
+      - torch
