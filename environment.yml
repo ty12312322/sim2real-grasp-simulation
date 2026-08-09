@@ -13,3 +13,4 @@ dependencies:
       - optuna
       - stable-baselines3
       - torch
+      - cmaes
