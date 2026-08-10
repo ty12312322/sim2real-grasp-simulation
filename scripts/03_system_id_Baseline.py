@@ -18,7 +18,7 @@ def simulate_grasp(mass, friction, gui=False):
     else:
         physics_client = p.connect(p.DIRECT)  # 极速后台模式，提速百倍！
         
-    p.setAdditionalSearchPath(pybullet_data.getDataPath())
+    p.setAdditionalSearchPath(pybullet_data.getDataPath())#PyBullet 官方提供的一大堆测试模型
     p.setGravity(0, 0, -9.81)
     time_step = 1.0 / 240.0
     p.setTimeStep(time_step)
