@@ -85,7 +85,7 @@ def simulate_grasp(mass, friction, gui=False):
 
 def main():
     print("\n" + "="*50)
-    print("🚀 [Phase 2: 终极解耦系统辨识 (多模态+激励滑脱)]")
+    print("🚀 [Phase 2: 终极解耦系统辨识 (多模态+激励滑脱+自适应归一化)]")
     print("="*50)
 
     TRUE_MASS = 0.12
@@ -98,6 +98,13 @@ def main():
     target_z += np.random.normal(0, 0.002, size=target_z.shape) # 相机噪声 2mm
     target_f += np.random.normal(0, 0.5, size=target_f.shape)   # 力传感器底噪 0.5N
 
+    # ================= 🌟核心改动 1：动态计算特征标尺 =================
+    # 防止分母为 0，加一个极小的常数 1e-6
+    scale_z = np.mean(target_z**2) + 1e-6  
+    scale_f = np.mean(target_f**2) + 1e-6  
+    print(f"⚖️ 自动计算归一化标尺 -> Z轴方差: {scale_z:.4f}, 受力方差: {scale_f:.2f}")
+    # ===================================================================
+
     history_loss = []
     
     def objective(trial):
@@ -106,14 +113,13 @@ def main():
         
         sim_z, sim_f = simulate_grasp(guess_mass, guess_friction, gui=False)
         
-        # ================= 核心：多模态 Loss 函数 =================
-        # Z轴位置误差
-        loss_z = np.mean((sim_z - target_z)**2)
-        # 接触力误差
-        loss_f = np.mean((sim_f - target_f)**2)
+        # ================= 🌟核心改动 2：无量纲化 Loss =================
+        # 将均方误差除以它们各自的标尺，转化为纯粹的“相对畸变率”
+        loss_z_norm = np.mean((sim_z - target_z)**2) / scale_z
+        loss_f_norm = np.mean((sim_f - target_f)**2) / scale_f
         
-        # 权重配比：让位置和力在一个量级上
-        total_loss = loss_z + (0.001 * loss_f)
+        # 现在它们都在 0~1 的量级，直接 1:1 相加即可完美平衡！
+        total_loss = loss_z_norm + loss_f_norm
         # ==========================================================
         
         history_loss.append(total_loss)
@@ -141,9 +147,9 @@ def main():
     plt.figure(figsize=(8, 5))
     plt.plot(history_loss, color='red', linewidth=2)
     plt.yscale('log') 
-    plt.title("Multi-modal Decoupling System ID Convergence")
+    plt.title("Normalized Multi-modal System ID Convergence")
     plt.xlabel("Trial (Iteration)")
-    plt.ylabel("Combined MSE Loss (Log Scale)")
+    plt.ylabel("Normalized MSE Loss (Log Scale)")
     plt.grid(True, alpha=0.3)
     plt.show()
 
