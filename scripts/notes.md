@@ -951,3 +951,84 @@ sys_delay      | 0.0300         | 0.0265         | 11.74%
 放大隐性特征：测试算法闭环时，把真实的 com_dz 设为 0.015 (即 1.5 厘米)，确认模型能抓到这个特征后，再去挑战极限精度。
 EM 交替打磨：用 A $\rightarrow$ B $\rightarrow$ C $\rightarrow$ B $\rightarrow$ C 的交替循环（Alternating Optimization）取代一锅炖，用精确修正后的质量去反哺摩擦力计算，彻底解决误差级联。这个说得对吗
 
+### 8.20 systum id 4
+
+修改点汇总
+修改点	位置	说明
+1	_measure_empty_torque	新增空载力矩测量，用于质量去皮
+2	simulate_stage_B	先测空载力矩，再抓取
+3	simulate_stage_B	计算 delta_tau = tau_loaded - tau_empty
+4	simulate_stage_B	记录接触穿透深度 c[8]
+5	simulate_stage_B	返回额外观测 penetration 和 delta_tau
+6	simulate_stage_C	夹持力从 3.5N 降至 1.0N，放大偏心效应
+7	simulate_stage_C	侧向摩擦力索引 c[11] → c[12]
+8	compute_loss_stage_B	适配新的五元组数据
+9	主程序 Stage A	sys_delay 	objective_A	移除 sys_delay 搜索，只优化 joint_damp
+10	主程序流程	增加第二轮精修（Refine B、Refine C），两轮交替优化
+运行后，质量、接触阻尼、质心偏移的辨识精度应大幅提升。如果仍有部分参数误差偏大，可进一步调整夹持力、激励幅度或增加观测信号。
+
+05阶段了
+pybullet build time: Oct 21 2025 12:15:52
+======================================================================
+🔧 [工业级物理参数辨识] 10 维全参数标定 (互相关+交替优化)
+======================================================================
+
+📡 [Step 0] 互相关估计系统延迟...
+  真实延迟: 6.0 帧 = 0.0250 s
+  估计延迟: 6 帧 = 0.0250 s
+
+📡 [Step 1] 生成真实物理参考轨迹 (含传感器噪声)...
+
+📘 [Stage A] 辨识 joint_damp (sys_delay 已锁定)...
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:293: FutureWarning: `restart_strategy` has been deprecated in v4.4.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.4.0. From v4.4.0 onward, `restart_strategy` automatically falls back to `None`. `restart_strategy` will be supported in OptunaHub.
+  optuna_warn(
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:307: FutureWarning: `sigma0` has been deprecated in v4.9.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.9.0.
+  optuna_warn(msg, FutureWarning)
+  --> 阶段 A 完成: joint_damp=3.4510
+
+📘 [Stage B] 辨识质量与接触参数: mass, k_n, c_n...
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:293: FutureWarning: `restart_strategy` has been deprecated in v4.4.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.4.0. From v4.4.0 onward, `restart_strategy` automatically falls back to `None`. `restart_strategy` will be supported in OptunaHub.
+  optuna_warn(
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:307: FutureWarning: `sigma0` has been deprecated in v4.9.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.9.0.
+  optuna_warn(msg, FutureWarning)
+  --> 阶段 B 完成: mass=0.1624, k_n=10616.8, c_n=82.96
+
+📘 [Stage C] 辨识表面摩擦与 3D 质心偏移 (mu_lat, mu_spin, com_xyz)...
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:293: FutureWarning: `restart_strategy` has been deprecated in v4.4.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.4.0. From v4.4.0 onward, `restart_strategy` automatically falls back to `None`. `restart_strategy` will be supported in OptunaHub.
+  optuna_warn(
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:307: FutureWarning: `sigma0` has been deprecated in v4.9.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.9.0.
+  optuna_warn(msg, FutureWarning)
+  --> 阶段 C 完成: mu_lat=0.7459, mu_spin=0.0791, com_dz=0.0218
+
+🔁 [Refine B] 精修 mass, k_n, c_n (固定摩擦与质心)...
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:293: FutureWarning: `restart_strategy` has been deprecated in v4.4.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.4.0. From v4.4.0 onward, `restart_strategy` automatically falls back to `None`. `restart_strategy` will be supported in OptunaHub.
+  optuna_warn(
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:307: FutureWarning: `sigma0` has been deprecated in v4.9.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.9.0.
+  optuna_warn(msg, FutureWarning)
+
+🔁 [Refine C] 精修 mu_lat, mu_spin, com_xyz (固定质量与接触)...
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:293: FutureWarning: `restart_strategy` has been deprecated in v4.4.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.4.0. From v4.4.0 onward, `restart_strategy` automatically falls back to `None`. `restart_strategy` will be supported in OptunaHub.
+  optuna_warn(
+D:\Anaconda_envs\envs\sim2real\lib\site-packages\optuna\samplers\_cmaes.py:307: FutureWarning: `sigma0` has been deprecated in v4.9.0. This feature will be removed in v6.0.0. See https://github.com/optuna/optuna/releases/tag/v4.9.0.
+  optuna_warn(msg, FutureWarning)
+
+======================================================================
+🏆 [最终标定评估结果] 10 维参数标定误差对比表
+Parameter      | Ground Truth   | Estimated      | Error %   
+----------------------------------------------------------------------
+mass           | 0.1500         | 0.1450         | 3.32%     
+mu_lat         | 0.8000         | 0.5283         | 33.96%    
+mu_spin        | 0.0500         | 0.0394         | 21.18%    
+k_n            | 5000.0000      | 9349.9664      | 87.00%    
+c_n            | 50.0000        | 10.3970        | 79.21%    
+com_dx         | 0.0100         | -0.0104        | 204.12%   
+com_dy         | -0.0050        | -0.0117        | 133.95%   
+com_dz         | 0.0020         | 0.0248         | 1140.88%  
+joint_damp     | 1.5000         | 3.4510         | 130.07%   
+sys_delay      | 0.0250         | 0.0250         | 0.00%     
+======================================================================
+📊 Loss 曲线已保存至 'loss_curves_final.png'
+(sim2real) PS D:\学学学学\sim2real-grasp-simulation> 
+
+感觉step的问题
+
