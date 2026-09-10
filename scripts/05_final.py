@@ -58,12 +58,12 @@ class ParamNormalizer:
 # =====================================================================
 class RobotSimulator:
     def __init__(self, gui=False):
-        self.gui = gui
+        self.gui = gui #GUI 模式会弹出一个 3D 可视化窗口（方便调试），DIRECT 模式是后台无头渲染
         self.physics_client = None
         self.robot_id = None
         self.cube_id = None
         self.plane_id = None
-        self.EE_INDEX = 11
+        self.EE_INDEX = 11  # EE_INDEX 是你代码中定义的末端执行器（End-Effector）的关节索引11 对应的是 panda_grasptip（夹爪指尖/末端工具坐标系）
         self.FINGER_L, self.FINGER_R = 9, 10
         self.ARM_JOINTS = list(range(7))
         self.use_external_torque_com = False
@@ -75,15 +75,15 @@ class RobotSimulator:
             return float(np.linalg.norm(val))
         return float(val)
 
-    def _get_static_wrist_torque(self, duration=0.3):
-        """在当前位置静止采集腕部关节（5,6）平均力矩"""
-        steps = int(duration * 240)
-        torques = []
-        for _ in range(steps):
-            p.stepSimulation()
-            states = p.getJointStates(self.robot_id, [5, 6])
-            torques.append([states[0][3], states[1][3]])
-        return np.mean(torques, axis=0)
+        def _get_static_wrist_torque(self, duration=0.3):
+            """在当前位置静止采集腕部关节（5,6）平均力矩"""
+            steps = int(duration * 240)
+            torques = []
+            for _ in range(steps):
+                p.stepSimulation()
+                states = p.getJointStates(self.robot_id, [5, 6])
+                torques.append([states[0][3], states[1][3]])
+            return np.mean(torques, axis=0)
 
     # 🔧 新增：互相关估计系统延迟（单位：帧）
     def estimate_sys_delay(self, params, duration=0.5, joint_idx=4):
@@ -97,16 +97,17 @@ class RobotSimulator:
 
         target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
         base_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.3], target_orn))
+        #我要让机械臂的指尖（EE_INDEX=11）移动到空间坐标 [0.5, 0.0, 0.3] 米处，并且末端要朝下（旋转矩阵为 [π,0,0]）
         self.reset_to_state(cube_pos=[0.5, 0.0, 0.0], arm_j=base_j, finger_pos=0.04)
 
-        # 初始化缓冲，保持静止
+        # 初始化缓冲，保持静止，清空动作缓存并填充基线指令（防止缓存空导致首次执行异常）
         self.action_buffer.clear()
         for _ in range(self.delay_steps):
             self.action_buffer.append((base_j, 0.04, 5.0))
 
-        # 阶跃命令：前 20 帧保持基线，然后突然改变关节 4 目标
+        # 阶跃命令：前 30 帧保持基线，然后突然改变关节 4 目标
         step_trigger = 30
-        step_target = base_j[joint_idx] + 0.3  # 阶跃幅度
+        step_target = base_j[joint_idx] + 0.2  # 阶跃幅度：关节 4 上施加一个固定阶跃 0.2 rad
 
         cmd_traj = []
         vel_traj = []
@@ -121,29 +122,34 @@ class RobotSimulator:
             self._apply_action(curr_cmd, finger_pos=0.04, finger_force=5.0, arm_force=120.0)
             p.stepSimulation()
 
-            cmd_traj.append(curr_cmd[joint_idx])
+            cmd_traj.append(curr_cmd[joint_idx]) #记录指令曲线
             state = p.getJointState(self.robot_id, joint_idx)
-            vel_traj.append(state[1])
+            vel_traj.append(state[1])#因为位置信号在阶跃初期变化非常缓慢（微分滞后），而速度信号对阶跃指令的响应是瞬间跳变的。
 
         # 找到速度开始偏离基线的时刻（响应开始）
         baseline_vel = np.mean(vel_traj[:step_trigger])
         vel_arr = np.array(vel_traj)
         threshold = baseline_vel + 0.05 * np.max(np.abs(vel_arr))  # 阈值设为峰值5%
-        # 从阶跃时刻往后搜索，找到第一个超过阈值的点
+        # 从阶跃时刻往后搜索，找到第一组三个都超过阈值的点（防噪音）
+        consecutive_count = 0
         response_start = None
         for i in range(step_trigger, steps):
             if abs(vel_arr[i] - baseline_vel) > threshold:
-                response_start = i
-                break
+                consecutive_count += 1
+                if consecutive_count >= 3:
+                    response_start = i - 2  # 取连续第一次超过的时刻
+                    break
+            else:
+                consecutive_count = 0
         if response_start is None:
             response_start = steps - 1
 
-        delay_frames = max(0, response_start - step_trigger)
+        delay_frames = max(0, response_start - step_trigger)#防止负数
         return delay_frames
 
     def connect(self):
         if self.physics_client is not None:
-            return
+            return   #如果已经连上了，就不再重复连接
         self.physics_client = p.connect(p.GUI if self.gui else p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
@@ -153,7 +159,7 @@ class RobotSimulator:
             numSubSteps=4,
             enableConeFriction=1,
             contactBreakingThreshold=0.001
-        )
+        )#之前调好的参数设置
         self.plane_id = p.loadURDF("plane.urdf")
         self.robot_id = p.loadURDF("franka_panda/panda.urdf", useFixedBase=True)
         self.cube_id = p.loadURDF("cube_small.urdf", basePosition=[0.5, 0.0, 0.2])
