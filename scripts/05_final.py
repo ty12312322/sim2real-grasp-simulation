@@ -215,12 +215,14 @@ class RobotSimulator:
         exec_j, exec_finger_pos, exec_finger_force = self.action_buffer[0]
 
         for idx, j_idx in enumerate(self.ARM_JOINTS):
+            # VELOCITY_CONTROL：POSITION_CONTROL 对这个 Panda 臂（roll=π 姿态）会下垂/振荡抓不住，
+            # 改用速度指令 + 强刹车力，让臂能稳定持姿并跟踪旋转
+            current = p.getJointState(self.robot_id, j_idx)[0]
+            target_vel = (exec_j[idx] - current) * 15.0
             p.setJointMotorControl2(
-                self.robot_id, j_idx, p.POSITION_CONTROL,
-                targetPosition=exec_j[idx],
-                force=arm_force,
-                positionGain=0.3,
-                velocityGain=1.0
+                self.robot_id, j_idx, p.VELOCITY_CONTROL,
+                targetVelocity=target_vel,
+                force=5000.0
             )
         p.setJointMotorControl2(
             self.robot_id, self.FINGER_L, p.POSITION_CONTROL,
@@ -341,7 +343,7 @@ class RobotSimulator:
         self._settle_grasp(hold_pos=(0.5, 0.0, 0.2), finger_target=0.020, finger_force=3.5, steps=50)
 
         roll = np.pi + 0.6 * np.sin(2 * np.pi * 0.6 * times)
-        pitch = 0.4 * np.sin(2 * np.pi * 0.9 * times + np.pi / 4)
+        pitch = 0.4 * np.sin(2 * np.pi * 0.9 * times)
         yaw = 0.3 * np.sin(2 * np.pi * 1.5 * times)
 
         cube_pos_list, cube_orn_list, contact_force_list = [], [], []
