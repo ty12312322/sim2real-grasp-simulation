@@ -428,8 +428,8 @@ def compute_loss_stage_C(sim_data, real_data, scales, com_xyz=(0.0, 0.0, 0.0)):
     loss_pos = np.mean((sim_pos - real_pos)**2) / scales['pos']
     loss_orn = np.mean((sim_orn - real_orn)**2) / scales['orn']
     loss_cf = np.mean((sim_cf - real_cf)**2) / scales['cf']
-    # 几何正则化：防止质心漂到搜索边界
-    reg = 0.001 * (com_xyz[0]**2 + com_xyz[1]**2 + com_xyz[2]**2)
+    # 几何正则化：防止质心漂到搜索边界（com 米制转 mm 才让 0.001 生效）
+    reg = 0.001 * ((com_xyz[0] * 1000)**2 + (com_xyz[1] * 1000)**2 + (com_xyz[2] * 1000)**2)
     return float(loss_pos + loss_orn + loss_cf + reg)
 
 
@@ -632,13 +632,13 @@ def main():
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C_ref.best_params[key])
 
         # -------------------------------------------------------------
-        # 🔧 Final Joint：10 维全参数联合优化（sys_delay 固定）
+        # 🔧 Final Joint：8 维联合优化（sys_delay / joint_damp 固定）
         # -------------------------------------------------------------
-        print("\n🧩 [Final Joint] 10 维全参数联合优化 (sys_delay 固定)...")
+        print("\n🧩 [Final Joint] 8 维联合优化 (sys_delay / joint_damp 固定)...")
         def objective_final(trial):
             p_dict = NOMINAL.copy()
             for key in ['mass', 'mu_lat', 'mu_spin', 'k_n', 'c_n',
-                        'com_dx', 'com_dy', 'com_dz', 'joint_damp']:
+                        'com_dx', 'com_dy', 'com_dz']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_A = sim.simulate_stage_A(p_dict)
             sim_B = sim.simulate_stage_B(p_dict)
@@ -653,7 +653,7 @@ def main():
         study_final.optimize(objective_final, n_trials=400, show_progress_bar=False)
         loss_history['Final Joint'] = study_final.trials_dataframe()['value'].tolist()
         for key in ['mass', 'mu_lat', 'mu_spin', 'k_n', 'c_n',
-                    'com_dx', 'com_dy', 'com_dz', 'joint_damp']:
+                    'com_dx', 'com_dy', 'com_dz']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_final.best_params[key])
 
         # -------------------------------------------------------------
