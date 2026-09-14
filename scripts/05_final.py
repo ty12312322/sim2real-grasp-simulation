@@ -75,15 +75,15 @@ class RobotSimulator:
             return float(np.linalg.norm(val))
         return float(val)
 
-        def _get_static_wrist_torque(self, duration=0.3):
-            """在当前位置静止采集腕部关节（5,6）平均力矩"""
-            steps = int(duration * 240)
-            torques = []
-            for _ in range(steps):
-                p.stepSimulation()
-                states = p.getJointStates(self.robot_id, [5, 6])
-                torques.append([states[0][3], states[1][3]])
-            return np.mean(torques, axis=0)
+    def _get_static_wrist_torque(self, duration=0.3):
+        """在当前位置静止采集腕部关节（5,6）平均力矩，用于质量标定基准"""
+        steps = int(duration * 240)
+        torques = []
+        for _ in range(steps):
+            p.stepSimulation()
+            states = p.getJointStates(self.robot_id, [5, 6])
+            torques.append([states[0][3], states[1][3]])  # 应用力矩
+        return np.mean(torques, axis=0)  # 返回 [tau5_mean, tau6_mean]
 
     # 🔧 新增：互相关估计系统延迟（单位：帧）
     def estimate_sys_delay(self, params, duration=0.5, joint_idx=4):
@@ -376,11 +376,27 @@ class RobotSimulator:
 
 
 # =====================================================================
-# 3. 损失函数 (保持原样)
+# 3. 损失函数
 # =====================================================================
+def moving_average(signal, window=5):
+    """沿时间轴(axis=0)做滑动平均滤波，抑制接触力高频震荡"""
+    signal = np.asarray(signal, dtype=float)
+    kernel = np.ones(window) / window
+    if signal.ndim == 1:
+        return np.convolve(signal, kernel, mode='same')
+    if signal.ndim == 2:
+        out = np.empty_like(signal)
+        for col in range(signal.shape[1]):
+            out[:, col] = np.convolve(signal[:, col], kernel, mode='same')
+        return out
+    return signal
+
 def compute_loss_stage_A(sim_data, real_data, scales):
     sim_q, sim_v, sim_t = sim_data
     real_q, real_v, real_t = real_data
+    assert sim_q.shape == real_q.shape, "Stage A 位置维度不一致"
+    assert sim_v.shape == real_v.shape, "Stage A 速度维度不一致"
+    assert sim_t.shape == real_t.shape, "Stage A 力矩维度不一致"
     loss_q = np.mean((sim_q - real_q)**2) / scales['q']
     loss_v = np.mean((sim_v - real_v)**2) / scales['v']
     loss_t = np.mean((sim_t - real_t)**2) / scales['t']
@@ -389,18 +405,32 @@ def compute_loss_stage_A(sim_data, real_data, scales):
 def compute_loss_stage_B(sim_data, real_data, scales):
     sim_z, sim_nf, sim_tq = sim_data
     real_z, real_nf, real_tq = real_data
+    assert sim_z.shape == real_z.shape, "Stage B 高度维度不一致"
+    assert sim_nf.shape == real_nf.shape, "Stage B 接触力维度不一致"
+    assert sim_tq.shape == real_tq.shape, "Stage B 腕力矩维度不一致"
+    # 接触力信号先做滑动平均滤波，抑制高频震荡
+    sim_nf = moving_average(sim_nf, window=5)
+    real_nf = moving_average(real_nf, window=5)
     loss_z = np.mean((sim_z - real_z)**2) / scales['z']
     loss_nf = np.mean((sim_nf - real_nf)**2) / scales['nf']
     loss_tq = np.mean((sim_tq - real_tq)**2) / scales['tq']
     return float(loss_z + loss_nf + loss_tq)
 
-def compute_loss_stage_C(sim_data, real_data, scales):
+def compute_loss_stage_C(sim_data, real_data, scales, com_xyz=(0.0, 0.0, 0.0)):
     sim_pos, sim_orn, sim_cf = sim_data
     real_pos, real_orn, real_cf = real_data
+    assert sim_pos.shape == real_pos.shape, "Stage C 位置维度不一致"
+    assert sim_orn.shape == real_orn.shape, "Stage C 姿态维度不一致"
+    assert sim_cf.shape == real_cf.shape, "Stage C 接触力维度不一致"
+    # 接触力信号先做滑动平均滤波，抑制高频震荡
+    sim_cf = moving_average(sim_cf, window=5)
+    real_cf = moving_average(real_cf, window=5)
     loss_pos = np.mean((sim_pos - real_pos)**2) / scales['pos']
     loss_orn = np.mean((sim_orn - real_orn)**2) / scales['orn']
     loss_cf = np.mean((sim_cf - real_cf)**2) / scales['cf']
-    return float(loss_pos + loss_orn + loss_cf)
+    # 几何正则化：防止质心漂到搜索边界
+    reg = 0.001 * (com_xyz[0]**2 + com_xyz[1]**2 + com_xyz[2]**2)
+    return float(loss_pos + loss_orn + loss_cf + reg)
 
 
 # =====================================================================
@@ -418,7 +448,7 @@ def main():
         "mu_spin": 0.05,
         "k_n": 5000.0,
         "c_n": 50.0,
-        "com_dx": 0.01,
+        "com_dx": 0.005,
         "com_dy": -0.005,
         "com_dz": 0.002,
         "joint_damp": 1.5,
@@ -426,14 +456,14 @@ def main():
     }
 
     PARAM_BOUNDS = {
-        "mass": (0.05, 0.35),
-        "mu_lat": (0.20, 1.20),
+        "mass": (0.08, 0.25),
+        "mu_lat": (0.40, 1.10),
         "mu_spin": (0.005, 0.12),
-        "k_n": (1000.0, 12000.0),
-        "c_n": (10.0, 180.0),
-        "com_dx": (-0.03, 0.03),
-        "com_dy": (-0.03, 0.03),
-        "com_dz": (-0.03, 0.03),
+        "k_n": (2000.0, 10000.0),
+        "c_n": (20.0, 120.0),
+        "com_dx": (-0.008, 0.008),
+        "com_dy": (-0.008, 0.008),
+        "com_dz": (-0.008, 0.008),
         "joint_damp": (0.2, 3.5),
         "sys_delay": (0.0, 0.08)
     }
@@ -467,21 +497,24 @@ def main():
         real_B = sim.simulate_stage_B(TRUE_PARAMS)
         real_C = sim.simulate_stage_C(TRUE_PARAMS)
 
-        # 添加噪声
+        # 保留一份无噪声真值数据，用于最终评估与画图
+        clean_data = {'A': real_A, 'B': real_B, 'C': real_C}
+
+        # 添加传感器噪声（噪声已降低，避免淹没微弱物理特征）
         real_A_noisy = (
-            real_A[0] + np.random.normal(0, 0.001, real_A[0].shape),
+            real_A[0] + np.random.normal(0, 1e-5, real_A[0].shape),
             real_A[1] + np.random.normal(0, 0.005, real_A[1].shape),
             real_A[2] + np.random.normal(0, 0.02, real_A[2].shape)
         )
         real_B_noisy = (
-            real_B[0] + np.random.normal(0, 0.0005, real_B[0].shape),
-            real_B[1] + np.random.normal(0, 0.2, real_B[1].shape),
+            real_B[0] + np.random.normal(0, 1e-5, real_B[0].shape),
+            real_B[1] + np.random.normal(0, 0.01, real_B[1].shape),
             real_B[2] + np.random.normal(0, 0.01, real_B[2].shape)
         )
         real_C_noisy = (
-            real_C[0] + np.random.normal(0, 0.0005, real_C[0].shape),
-            real_C[1] + np.random.normal(0, 0.003, real_C[1].shape),
-            real_C[2] + np.random.normal(0, 0.1, real_C[2].shape)
+            real_C[0] + np.random.normal(0, 1e-5, real_C[0].shape),
+            real_C[1] + np.random.normal(0, 1e-5, real_C[1].shape),
+            real_C[2] + np.random.normal(0, 0.01, real_C[2].shape)
         )
 
         scales_A = {
@@ -502,10 +535,9 @@ def main():
 
         loss_history = {}
 
-        def make_sampler(n_startup=15, sigma0=0.25):
-            return optuna.samplers.CmaEsSampler(
-                seed=42, sigma0=sigma0, restart_strategy="ipop", n_startup_trials=n_startup
-            )
+        def make_sampler(n_startup=15):
+            # Optuna 4.9.0：sigma0 / restart_strategy 已弃用，步长由归一化参数空间缩放控制
+            return optuna.samplers.CmaEsSampler(seed=42, n_startup_trials=n_startup)
 
         # -------------------------------------------------------------
         # Stage A：只优化 joint_damp (sys_delay 已固定)
@@ -517,7 +549,7 @@ def main():
             sim_A = sim.simulate_stage_A(p_dict)
             return compute_loss_stage_A(sim_A, real_A_noisy, scales_A)
 
-        study_A = optuna.create_study(sampler=make_sampler(15, 0.25), direction="minimize")
+        study_A = optuna.create_study(sampler=make_sampler(15), direction="minimize")
         study_A.optimize(objective_A, n_trials=60, show_progress_bar=False)
         loss_history['Stage A'] = study_A.trials_dataframe()['value'].tolist()
         NOMINAL['joint_damp'] = normalizer.norm_to_phys('joint_damp', study_A.best_params['joint_damp'])
@@ -535,8 +567,8 @@ def main():
             sim_B = sim.simulate_stage_B(p_dict)
             return compute_loss_stage_B(sim_B, real_B_noisy, scales_B)
 
-        study_B = optuna.create_study(sampler=make_sampler(20, 0.25), direction="minimize")
-        study_B.optimize(objective_B, n_trials=100, show_progress_bar=False)
+        study_B = optuna.create_study(sampler=make_sampler(20), direction="minimize")
+        study_B.optimize(objective_B, n_trials=150, show_progress_bar=False)
         loss_history['Stage B'] = study_B.trials_dataframe()['value'].tolist()
         NOMINAL['mass'] = normalizer.norm_to_phys('mass', study_B.best_params['mass'])
         NOMINAL['k_n'] = normalizer.norm_to_phys('k_n', study_B.best_params['k_n'])
@@ -552,10 +584,11 @@ def main():
             for key in ['mu_lat', 'mu_spin', 'com_dx', 'com_dy', 'com_dz']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_C = sim.simulate_stage_C(p_dict)
-            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C)
+            com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
+            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
 
-        study_C = optuna.create_study(sampler=make_sampler(30, 0.30), direction="minimize")
-        study_C.optimize(objective_C, n_trials=180, show_progress_bar=False)
+        study_C = optuna.create_study(sampler=make_sampler(30), direction="minimize")
+        study_C.optimize(objective_C, n_trials=300, show_progress_bar=False)
         loss_history['Stage C'] = study_C.trials_dataframe()['value'].tolist()
         for key in ['mu_lat', 'mu_spin', 'com_dx', 'com_dy', 'com_dz']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C.best_params[key])
@@ -573,8 +606,8 @@ def main():
             sim_B = sim.simulate_stage_B(p_dict)
             return compute_loss_stage_B(sim_B, real_B_noisy, scales_B)
 
-        study_B_ref = optuna.create_study(sampler=make_sampler(20, 0.15), direction="minimize")
-        study_B_ref.optimize(objective_B_refine, n_trials=80, show_progress_bar=False)
+        study_B_ref = optuna.create_study(sampler=make_sampler(20), direction="minimize")
+        study_B_ref.optimize(objective_B_refine, n_trials=150, show_progress_bar=False)
         loss_history['Refine B'] = study_B_ref.trials_dataframe()['value'].tolist()
         NOMINAL['mass'] = normalizer.norm_to_phys('mass', study_B_ref.best_params['mass'])
         NOMINAL['k_n'] = normalizer.norm_to_phys('k_n', study_B_ref.best_params['k_n'])
@@ -589,16 +622,42 @@ def main():
             for key in ['mu_lat', 'mu_spin', 'com_dx', 'com_dy', 'com_dz']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_C = sim.simulate_stage_C(p_dict)
-            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C)
+            com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
+            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
 
-        study_C_ref = optuna.create_study(sampler=make_sampler(30, 0.15), direction="minimize")
-        study_C_ref.optimize(objective_C_refine, n_trials=80, show_progress_bar=False)
+        study_C_ref = optuna.create_study(sampler=make_sampler(30), direction="minimize")
+        study_C_ref.optimize(objective_C_refine, n_trials=200, show_progress_bar=False)
         loss_history['Refine C'] = study_C_ref.trials_dataframe()['value'].tolist()
         for key in ['mu_lat', 'mu_spin', 'com_dx', 'com_dy', 'com_dz']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C_ref.best_params[key])
 
         # -------------------------------------------------------------
-        # 最终结果（直接使用 NOMINAL，不再有 Final Joint 联合优化）
+        # 🔧 Final Joint：10 维全参数联合优化（sys_delay 固定）
+        # -------------------------------------------------------------
+        print("\n🧩 [Final Joint] 10 维全参数联合优化 (sys_delay 固定)...")
+        def objective_final(trial):
+            p_dict = NOMINAL.copy()
+            for key in ['mass', 'mu_lat', 'mu_spin', 'k_n', 'c_n',
+                        'com_dx', 'com_dy', 'com_dz', 'joint_damp']:
+                p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
+            sim_A = sim.simulate_stage_A(p_dict)
+            sim_B = sim.simulate_stage_B(p_dict)
+            sim_C = sim.simulate_stage_C(p_dict)
+            loss_A = compute_loss_stage_A(sim_A, real_A_noisy, scales_A)
+            loss_B = compute_loss_stage_B(sim_B, real_B_noisy, scales_B)
+            com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
+            loss_C = compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
+            return float(loss_A + loss_B + loss_C)
+
+        study_final = optuna.create_study(sampler=make_sampler(40), direction="minimize")
+        study_final.optimize(objective_final, n_trials=400, show_progress_bar=False)
+        loss_history['Final Joint'] = study_final.trials_dataframe()['value'].tolist()
+        for key in ['mass', 'mu_lat', 'mu_spin', 'k_n', 'c_n',
+                    'com_dx', 'com_dy', 'com_dz', 'joint_damp']:
+            NOMINAL[key] = normalizer.norm_to_phys(key, study_final.best_params[key])
+
+        # -------------------------------------------------------------
+        # 最终结果
         # -------------------------------------------------------------
         final_calibrated_params = NOMINAL.copy()
 
@@ -617,12 +676,37 @@ def main():
             print(f"{key:<14} | {gt:<14.4f} | {est:<14.4f} | {err_str:<10}")
         print("=" * 70)
 
+        # -------------------------------------------------------------
+        # 干净数据最终评估（无噪声真值，衡量真实标定质量）
+        # -------------------------------------------------------------
+        print("\n🧪 [Clean-data 最终评估] 用无噪声真值数据评估标定结果...")
+        scales_A_clean = {'q': np.var(clean_data['A'][0]) + 1e-5,
+                          'v': np.var(clean_data['A'][1]) + 1e-5,
+                          't': np.var(clean_data['A'][2]) + 1e-5}
+        scales_B_clean = {'z': np.var(clean_data['B'][0]) + 1e-5,
+                          'nf': np.var(clean_data['B'][1]) + 1e-5,
+                          'tq': np.var(clean_data['B'][2]) + 1e-5}
+        scales_C_clean = {'pos': np.var(clean_data['C'][0]) + 1e-5,
+                          'orn': np.var(clean_data['C'][1]) + 1e-5,
+                          'cf': np.var(clean_data['C'][2]) + 1e-5}
+        sim_A_eval = sim.simulate_stage_A(final_calibrated_params)
+        sim_B_eval = sim.simulate_stage_B(final_calibrated_params)
+        sim_C_eval = sim.simulate_stage_C(final_calibrated_params)
+        clean_loss_A = compute_loss_stage_A(sim_A_eval, clean_data['A'], scales_A_clean)
+        clean_loss_B = compute_loss_stage_B(sim_B_eval, clean_data['B'], scales_B_clean)
+        com_xyz = (final_calibrated_params['com_dx'],
+                   final_calibrated_params['com_dy'],
+                   final_calibrated_params['com_dz'])
+        clean_loss_C = compute_loss_stage_C(sim_C_eval, clean_data['C'], scales_C_clean, com_xyz=com_xyz)
+        print(f"  干净数据损失  Stage A={clean_loss_A:.4f}  Stage B={clean_loss_B:.4f}  Stage C={clean_loss_C:.4f}")
+        print(f"  干净数据总损失 = {clean_loss_A + clean_loss_B + clean_loss_C:.4f}")
+
         # 绘图：显示所有阶段 loss 曲线
-        fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
         axes = axes.flatten()
-        stage_titles = ['Stage A', 'Stage B', 'Stage C', 'Refine B', 'Refine C', 'All Stages']
-        keys = ['Stage A', 'Stage B', 'Stage C', 'Refine B', 'Refine C']
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+        stage_titles = ['Stage A', 'Stage B', 'Stage C', 'Refine B', 'Refine C', 'Final Joint', 'All Stages']
+        keys = ['Stage A', 'Stage B', 'Stage C', 'Refine B', 'Refine C', 'Final Joint']
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
         for idx, key in enumerate(keys):
             ax = axes[idx]
             losses = loss_history[key]
@@ -634,7 +718,7 @@ def main():
             ax.grid(True, which='both', linestyle='--', alpha=0.5)
             ax.legend()
         # 最后一个子图：所有曲线
-        ax = axes[5]
+        ax = axes[6]
         for key, color in zip(keys, colors):
             ax.plot(loss_history[key], color=color, lw=1.5, label=key)
         ax.set_title("All Stages", fontsize=12, fontweight='bold')
@@ -643,6 +727,8 @@ def main():
         ax.set_yscale("log")
         ax.grid(True, which='both', linestyle='--', alpha=0.5)
         ax.legend()
+        # 隐藏多余的第 8 个子图
+        axes[7].axis('off')
         plt.tight_layout()
         plt.savefig("loss_curves_final.png", dpi=300)
         plt.show()
