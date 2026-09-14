@@ -15,3 +15,6 @@ data/
 # VSCode 个人配置
 .vscode/
 .DS_Store
+
+# 运行日志
+*.log
