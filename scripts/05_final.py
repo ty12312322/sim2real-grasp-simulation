@@ -248,6 +248,22 @@ class RobotSimulator:
             self._apply_action(init_j, finger_pos=finger_target, finger_force=finger_force)
             p.stepSimulation()
 
+    def _measure_static_grasp_torque(self, params, duration=0.15):
+        """抓取立方体后静止采集腕关节(5,6)平均力矩，用于质量标定（只依赖 mass，与 k_n/c_n 解耦）"""
+        self.set_params(params)
+        self._settle_grasp(hold_pos=(0.5, 0.0, 0.2), finger_target=0.018, finger_force=15.0, steps=50)
+        steps = int(duration * 240)
+        torques = []
+        for _ in range(steps):
+            for idx, j_idx in enumerate(self.ARM_JOINTS):
+                p.setJointMotorControl2(self.robot_id, j_idx, p.VELOCITY_CONTROL, targetVelocity=0.0, force=5000.0)
+            p.setJointMotorControl2(self.robot_id, self.FINGER_L, p.POSITION_CONTROL, targetPosition=0.018, force=15.0)
+            p.setJointMotorControl2(self.robot_id, self.FINGER_R, p.POSITION_CONTROL, targetPosition=0.018, force=15.0)
+            p.stepSimulation()
+            states = p.getJointStates(self.robot_id, [5, 6])
+            torques.append([states[0][3], states[1][3]])
+        return np.mean(torques, axis=0)
+
     # -----------------------------------------------------------------
     # 场景 A：空载多频扫频与阶跃 (保持原样)
     # -----------------------------------------------------------------
@@ -562,12 +578,28 @@ def main():
         print(f"  --> 阶段 A 完成: joint_damp={NOMINAL['joint_damp']:.4f}")
 
         # -------------------------------------------------------------
-        # Stage B：辨识 mass, k_n, c_n (原方法)
+        # Stage M：用静止腕力矩单独标定 mass（与 k_n/c_n 解耦）
         # -------------------------------------------------------------
-        print("\n📘 [Stage B] 辨识质量与接触参数: mass, k_n, c_n...")
-        def objective_B(trial):
+        print("\n📘 [Stage M] 用静止腕力矩标定 mass...")
+        real_static_tau5 = sim._measure_static_grasp_torque(TRUE_PARAMS)[0]
+        def objective_M(trial):
             p_dict = NOMINAL.copy()
             p_dict['mass'] = normalizer.norm_to_phys('mass', trial.suggest_float('mass', 0, 1))
+            tau5 = sim._measure_static_grasp_torque(p_dict)[0]
+            return float((tau5 - real_static_tau5) ** 2)
+
+        study_M = optuna.create_study(sampler=make_sampler(15), direction="minimize")
+        study_M.optimize(objective_M, n_trials=40, show_progress_bar=False)
+        loss_history['Stage M'] = study_M.trials_dataframe()['value'].tolist()
+        NOMINAL['mass'] = normalizer.norm_to_phys('mass', study_M.best_params['mass'])
+        print(f"  --> 阶段 M 完成: mass={NOMINAL['mass']:.4f}")
+
+        # -------------------------------------------------------------
+        # Stage B：辨识 mass, k_n, c_n (原方法)
+        # -------------------------------------------------------------
+        print("\n📘 [Stage B] 辨识接触参数: k_n, c_n (mass 已固定)...")
+        def objective_B(trial):
+            p_dict = NOMINAL.copy()
             p_dict['k_n'] = normalizer.norm_to_phys('k_n', trial.suggest_float('k_n', 0, 1))
             p_dict['c_n'] = normalizer.norm_to_phys('c_n', trial.suggest_float('c_n', 0, 1))
             sim_B = sim.simulate_stage_B(p_dict)
@@ -576,10 +608,9 @@ def main():
         study_B = optuna.create_study(sampler=make_sampler(20), direction="minimize")
         study_B.optimize(objective_B, n_trials=150, show_progress_bar=False)
         loss_history['Stage B'] = study_B.trials_dataframe()['value'].tolist()
-        NOMINAL['mass'] = normalizer.norm_to_phys('mass', study_B.best_params['mass'])
         NOMINAL['k_n'] = normalizer.norm_to_phys('k_n', study_B.best_params['k_n'])
         NOMINAL['c_n'] = normalizer.norm_to_phys('c_n', study_B.best_params['c_n'])
-        print(f"  --> 阶段 B 完成: mass={NOMINAL['mass']:.4f}, k_n={NOMINAL['k_n']:.1f}, c_n={NOMINAL['c_n']:.2f}")
+        print(f"  --> 阶段 B 完成: k_n={NOMINAL['k_n']:.1f}, c_n={NOMINAL['c_n']:.2f}")
 
         # -------------------------------------------------------------
         # Stage C：辨识摩擦与质心偏移 (原方法)
@@ -603,10 +634,9 @@ def main():
         # -------------------------------------------------------------
         # 🔧 第二轮精修：Refine B (固定摩擦与质心)
         # -------------------------------------------------------------
-        print("\n🔁 [Refine B] 精修 mass, k_n, c_n (固定摩擦与质心)...")
+        print("\n🔁 [Refine B] 精修 k_n, c_n (mass 固定)...")
         def objective_B_refine(trial):
             p_dict = NOMINAL.copy()
-            p_dict['mass'] = normalizer.norm_to_phys('mass', trial.suggest_float('mass', 0, 1))
             p_dict['k_n'] = normalizer.norm_to_phys('k_n', trial.suggest_float('k_n', 0, 1))
             p_dict['c_n'] = normalizer.norm_to_phys('c_n', trial.suggest_float('c_n', 0, 1))
             sim_B = sim.simulate_stage_B(p_dict)
@@ -615,7 +645,6 @@ def main():
         study_B_ref = optuna.create_study(sampler=make_sampler(20), direction="minimize")
         study_B_ref.optimize(objective_B_refine, n_trials=150, show_progress_bar=False)
         loss_history['Refine B'] = study_B_ref.trials_dataframe()['value'].tolist()
-        NOMINAL['mass'] = normalizer.norm_to_phys('mass', study_B_ref.best_params['mass'])
         NOMINAL['k_n'] = normalizer.norm_to_phys('k_n', study_B_ref.best_params['k_n'])
         NOMINAL['c_n'] = normalizer.norm_to_phys('c_n', study_B_ref.best_params['c_n'])
 
@@ -638,12 +667,12 @@ def main():
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C_ref.best_params[key])
 
         # -------------------------------------------------------------
-        # 🔧 Final Joint：8 维联合优化（sys_delay / joint_damp 固定）
+        # 🔧 Final Joint：7 维联合优化（sys_delay / joint_damp / mass 固定）
         # -------------------------------------------------------------
-        print("\n🧩 [Final Joint] 8 维联合优化 (sys_delay / joint_damp 固定)...")
+        print("\n🧩 [Final Joint] 7 维联合优化 (sys_delay / joint_damp / mass 固定)...")
         def objective_final(trial):
             p_dict = NOMINAL.copy()
-            for key in ['mass', 'mu_lat', 'mu_spin', 'k_n', 'c_n',
+            for key in ['mu_lat', 'mu_spin', 'k_n', 'c_n',
                         'com_dx', 'com_dy', 'com_dz']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_A = sim.simulate_stage_A(p_dict)
@@ -658,7 +687,7 @@ def main():
         study_final = optuna.create_study(sampler=make_sampler(40), direction="minimize")
         study_final.optimize(objective_final, n_trials=400, show_progress_bar=False)
         loss_history['Final Joint'] = study_final.trials_dataframe()['value'].tolist()
-        for key in ['mass', 'mu_lat', 'mu_spin', 'k_n', 'c_n',
+        for key in ['mu_lat', 'mu_spin', 'k_n', 'c_n',
                     'com_dx', 'com_dy', 'com_dz']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_final.best_params[key])
 
@@ -710,9 +739,9 @@ def main():
         # 绘图：显示所有阶段 loss 曲线
         fig, axes = plt.subplots(2, 4, figsize=(20, 10))
         axes = axes.flatten()
-        stage_titles = ['Stage A', 'Stage B', 'Stage C', 'Refine B', 'Refine C', 'Final Joint', 'All Stages']
-        keys = ['Stage A', 'Stage B', 'Stage C', 'Refine B', 'Refine C', 'Final Joint']
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+        stage_titles = ['Stage A', 'Stage M', 'Stage B', 'Stage C', 'Refine B', 'Refine C', 'Final Joint', 'All Stages']
+        keys = ['Stage A', 'Stage M', 'Stage B', 'Stage C', 'Refine B', 'Refine C', 'Final Joint']
+        colors = ['#1f77b4', '#17becf', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
         for idx, key in enumerate(keys):
             ax = axes[idx]
             losses = loss_history[key]
@@ -724,7 +753,7 @@ def main():
             ax.grid(True, which='both', linestyle='--', alpha=0.5)
             ax.legend()
         # 最后一个子图：所有曲线
-        ax = axes[6]
+        ax = axes[7]
         for key, color in zip(keys, colors):
             ax.plot(loss_history[key], color=color, lw=1.5, label=key)
         ax.set_title("All Stages", fontsize=12, fontweight='bold')
@@ -733,8 +762,6 @@ def main():
         ax.set_yscale("log")
         ax.grid(True, which='both', linestyle='--', alpha=0.5)
         ax.legend()
-        # 隐藏多余的第 8 个子图
-        axes[7].axis('off')
         plt.tight_layout()
         plt.savefig("loss_curves_final.png", dpi=300)
         plt.show()
