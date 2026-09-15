@@ -98,7 +98,8 @@ class RobotSimulator:
         target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
         base_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.3], target_orn, maxNumIterations=100))
         #我要让机械臂的指尖（EE_INDEX=11）移动到空间坐标 [0.5, 0.0, 0.3] 米处，并且末端要朝下（旋转矩阵为 [π,0,0]）
-        self.reset_to_state(cube_pos=[0.5, 0.0, 0.0], arm_j=base_j, finger_pos=0.04)
+        # 立方体放远并底面贴地：避免穿透地面产生 k_n 巨力弹飞（曾污染延迟估计）
+        self.reset_to_state(cube_pos=[1.5, 0.0, 0.025], arm_j=base_j, finger_pos=0.04)
 
         # 初始化缓冲，保持静止，清空动作缓存并填充基线指令（防止缓存空导致首次执行异常）
         self.action_buffer.clear()
@@ -275,7 +276,8 @@ class RobotSimulator:
 
         target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
         base_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.3], target_orn, maxNumIterations=100))
-        self.reset_to_state(cube_pos=[0.5, 0.0, 0.0], arm_j=base_j, finger_pos=0.04)
+        # 立方体放远并底面贴地：避免穿透地面产生 k_n 巨力弹飞撞臂（曾污染 Stage A 力矩信号）
+        self.reset_to_state(cube_pos=[1.5, 0.0, 0.025], arm_j=base_j, finger_pos=0.04)
         self.action_buffer.clear()
         for _ in range(self.delay_steps):
             self.action_buffer.append((base_j, 0.04, 5.0))
