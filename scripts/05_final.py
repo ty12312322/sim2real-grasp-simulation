@@ -312,33 +312,31 @@ class RobotSimulator:
         return np.array(joint_pos_list), np.array(joint_vel_list), np.array(joint_torque_list)
 
     # -----------------------------------------------------------------
-    # 场景 B：垂直变速变力振荡 (保持原样，不做任何修改)
+    # 场景 B：落块冲击实验（自由落体撞击平面，动态编码 k_n/c_n）
     # -----------------------------------------------------------------
-    def simulate_stage_B(self, params, duration=2.5):
+    def simulate_stage_B(self, params, duration=1.0):
         self.set_params(params)
         steps = int(duration * 240)
-        times = np.linspace(0, duration, steps)
 
-        self._settle_grasp(hold_pos=(0.5, 0.0, 0.2), finger_target=0.018, finger_force=15.0, steps=50)
-
-        target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
-        base_z = 0.20
-        target_z = base_z + 0.05 * np.sin(2 * np.pi * 1.2 * times) + 0.02 * np.sin(2 * np.pi * 2.8 * times)
-        dynamic_finger_force = 12.0 + 6.0 * np.sin(2 * np.pi * 4.0 * times)
+        # 夹爪回到默认位姿，远离立方体下落路径；立方体从 0.3m 自由落体撞击平面
+        base_j = [0.0] * 7
+        self.reset_to_state(cube_pos=(0.5, 0.0, 0.3), arm_j=base_j, finger_pos=0.04)
+        self.action_buffer.clear()
+        for _ in range(self.delay_steps):
+            self.action_buffer.append((base_j, 0.04, 5.0))
 
         cube_z_list, normal_force_list, wrist_torque_list = [], [], []
 
         for i in range(steps):
-            cmd_j = p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, target_z[i]], target_orn, maxNumIterations=100)
-            self._apply_action(cmd_j, finger_pos=0.015, finger_force=dynamic_finger_force[i], arm_force=180.0)
+            self._apply_action(base_j, finger_pos=0.04, finger_force=5.0, arm_force=120.0)
             p.stepSimulation()
 
             cube_pos, _ = p.getBasePositionAndOrientation(self.cube_id)
             cube_z_list.append(cube_pos[2])
 
-            contacts = p.getContactPoints(self.robot_id, self.cube_id)
+            contacts = p.getContactPoints(self.cube_id, self.plane_id)
             if contacts:
-                nf = max([c[9] for c in contacts])
+                nf = max([self._extract_force(c[9]) for c in contacts])
                 normal_force_list.append(float(nf))
             else:
                 normal_force_list.append(0.0)
