@@ -96,7 +96,7 @@ class RobotSimulator:
         steps = int(duration * 240)
 
         target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
-        base_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.3], target_orn, maxNumIterations=100))
+        base_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.3], target_orn, currentPositions=[0.0] * 9, maxNumIterations=100))
         #我要让机械臂的指尖（EE_INDEX=11）移动到空间坐标 [0.5, 0.0, 0.3] 米处，并且末端要朝下（旋转矩阵为 [π,0,0]）
         # 立方体放远并底面贴地：避免穿透地面产生 k_n 巨力弹飞（曾污染延迟估计）
         self.reset_to_state(cube_pos=[1.5, 0.0, 0.025], arm_j=base_j, finger_pos=0.04)
@@ -178,7 +178,7 @@ class RobotSimulator:
         p.resetBaseVelocity(self.cube_id, [0,0,0], [0,0,0])
         if arm_j is None:
             target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
-            arm_j = p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, cube_pos, target_orn, maxNumIterations=100)
+            arm_j = p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, cube_pos, target_orn, currentPositions=[0.0] * 9, maxNumIterations=100)
         for idx, j_idx in enumerate(self.ARM_JOINTS):
             p.resetJointState(self.robot_id, j_idx, arm_j[idx], targetVelocity=0.0)
         p.resetJointState(self.robot_id, self.FINGER_L, finger_pos, targetVelocity=0.0)
@@ -236,7 +236,7 @@ class RobotSimulator:
 
     def _settle_grasp(self, hold_pos=(0.5, 0.0, 0.2), finger_target=0.015, finger_force=12.0, steps=60):
         target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
-        init_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, hold_pos, target_orn, maxNumIterations=100))
+        init_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, hold_pos, target_orn, currentPositions=[0.0] * 9, maxNumIterations=100))
         self.reset_to_state(cube_pos=hold_pos, arm_j=init_j, finger_pos=0.025)
         self.action_buffer.clear()
         for _ in range(self.delay_steps):
@@ -275,7 +275,7 @@ class RobotSimulator:
         times = np.linspace(0, duration, steps)
 
         target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
-        base_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.3], target_orn, maxNumIterations=100))
+        base_j = list(p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.3], target_orn, currentPositions=[0.0] * 9, maxNumIterations=100))
         # 立方体放远并底面贴地：避免穿透地面产生 k_n 巨力弹飞撞臂（曾污染 Stage A 力矩信号）
         self.reset_to_state(cube_pos=[1.5, 0.0, 0.025], arm_j=base_j, finger_pos=0.04)
         self.action_buffer.clear()
