@@ -512,13 +512,8 @@ def main():
         # 估计后
         print(f"  估计延迟: {delay_frames_est} 帧 = {est_sys_delay:.4f} s")
 
-        print("\n📡 [Step 1] 生成真实物理参考轨迹 (含传感器噪声)...")
+        print("\n📡 [Step 1a] 生成 Stage A 真实轨迹...")
         real_A = sim.simulate_stage_A(TRUE_PARAMS)
-        real_B = sim.simulate_stage_B(TRUE_PARAMS)
-        real_C = sim.simulate_stage_C(TRUE_PARAMS)
-
-        # 保留一份无噪声真值数据，用于最终评估与画图
-        clean_data = {'A': real_A, 'B': real_B, 'C': real_C}
 
         # 添加传感器噪声（噪声已降低，避免淹没微弱物理特征）
         real_A_noisy = (
@@ -526,31 +521,10 @@ def main():
             real_A[1] + np.random.normal(0, 0.005, real_A[1].shape),
             real_A[2] + np.random.normal(0, 0.02, real_A[2].shape)
         )
-        real_B_noisy = (
-            real_B[0] + np.random.normal(0, 1e-5, real_B[0].shape),
-            real_B[1] + np.random.normal(0, 0.01, real_B[1].shape),
-            real_B[2] + np.random.normal(0, 0.01, real_B[2].shape)
-        )
-        real_C_noisy = (
-            real_C[0] + np.random.normal(0, 1e-5, real_C[0].shape),
-            real_C[1] + np.random.normal(0, 1e-5, real_C[1].shape),
-            real_C[2] + np.random.normal(0, 0.01, real_C[2].shape)
-        )
-
         scales_A = {
             'q': np.var(real_A_noisy[0]) + 1e-5,
             'v': np.var(real_A_noisy[1]) + 1e-5,
             't': np.var(real_A_noisy[2]) + 1e-5
-        }
-        scales_B = {
-            'z': np.var(real_B_noisy[0]) + 1e-5,
-            'nf': np.var(real_B_noisy[1]) + 1e-5,
-            'tq': np.var(real_B_noisy[2]) + 1e-5
-        }
-        scales_C = {
-            'pos': np.var(real_C_noisy[0]) + 1e-5,
-            'orn': np.var(real_C_noisy[1]) + 1e-5,
-            'cf': np.var(real_C_noisy[2]) + 1e-5
         }
 
         loss_history = {}
@@ -574,6 +548,34 @@ def main():
         loss_history['Stage A'] = study_A.trials_dataframe()['value'].tolist()
         NOMINAL['joint_damp'] = normalizer.norm_to_phys('joint_damp', study_A.best_params['joint_damp'])
         print(f"  --> 阶段 A 完成: joint_damp={NOMINAL['joint_damp']:.4f}")
+
+        # -------------------------------------------------------------
+        # Step 1b：生成 Stage B/C 真实数据（放在 Stage A 之后，避免落块实验污染 joint_damp 辨识）
+        # -------------------------------------------------------------
+        print("\n📡 [Step 1b] 生成 Stage B/C 真实轨迹...")
+        real_B = sim.simulate_stage_B(TRUE_PARAMS)
+        real_C = sim.simulate_stage_C(TRUE_PARAMS)
+        clean_data = {'A': real_A, 'B': real_B, 'C': real_C}
+        real_B_noisy = (
+            real_B[0] + np.random.normal(0, 1e-5, real_B[0].shape),
+            real_B[1] + np.random.normal(0, 0.01, real_B[1].shape),
+            real_B[2] + np.random.normal(0, 0.01, real_B[2].shape)
+        )
+        real_C_noisy = (
+            real_C[0] + np.random.normal(0, 1e-5, real_C[0].shape),
+            real_C[1] + np.random.normal(0, 1e-5, real_C[1].shape),
+            real_C[2] + np.random.normal(0, 0.01, real_C[2].shape)
+        )
+        scales_B = {
+            'z': np.var(real_B_noisy[0]) + 1e-5,
+            'nf': np.var(real_B_noisy[1]) + 1e-5,
+            'tq': np.var(real_B_noisy[2]) + 1e-5
+        }
+        scales_C = {
+            'pos': np.var(real_C_noisy[0]) + 1e-5,
+            'orn': np.var(real_C_noisy[1]) + 1e-5,
+            'cf': np.var(real_C_noisy[2]) + 1e-5
+        }
 
         # -------------------------------------------------------------
         # Stage M：用静止腕力矩单独标定 mass（与 k_n/c_n 解耦）
