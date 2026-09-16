@@ -37,14 +37,25 @@ PyBullet 等仿真器在机器人抓取任务中广泛应用，但仿真与真�
 
 ### 仿真器架构
 - 基于 PyBullet，加载 Franka Panda 机械臂与标准 cube
-- 通过 `changeDynamics()` 注入上述 10 个参数
+- 通过 `changeDynamics()` 注入接触参数，`applyExternalTorque` 模拟质心偏移（`localInertialFramePosition` 在 PyBullet 3.2.5 中无效）
 - 提高求解器迭代次数应对高刚度接触带来的数值爆炸
-- 输出多模态时间序列数据（关节状态、力矩、位姿）
+- 输出多模态时间序列数据（关节状态、力矩、位姿、接触力、角速度衰减）
 
-### 参数辨识
-- 使用 CMA-ES / Optuna 在 10 维参数空间搜索
-- 多模态 Loss：关节状态 + 关节力矩 + 物体位姿
-- 在合成数据上验证（先设真值，生成轨迹，再让优化器反推）
+### 参数辨识（分阶段解耦标定）
+核心思想：为每个参数设计"干净信号"的实验，单独标定，避免参数代偿。
+
+| Stage | 实验 | 标定参数 | 信号 |
+|---|---|---|---|
+| A | 空载扫频 | joint_damp | 关节阻尼力矩 |
+| M | 静止腕力矩 | mass | 静止腕力矩 ∝ mass 严格线性 |
+| B | 落块冲击 | k_n, c_n | 动态冲击的穿透/回弹 |
+| C | 抓取+旋转 | mu_lat, com_dx, com_dy | 摩擦/偏心引起的接触力不对称 |
+| D | 抓取+旋转 | com_dz | 与 mu_lat/com_xy 解耦的偏心信号 |
+| S | 平面扭转衰减 | mu_spin | 绕接触法线旋转的角速度衰减 |
+| — | 互相关 | sys_delay | 阶跃响应时延 |
+
+- 使用 CMA-ES / Optuna 逐 stage 搜索
+- Refine B / Refine C + Final Joint 交替精修
 
 ## 标定结果（合成数据验证）
 
@@ -75,11 +86,13 @@ sys_delay      | 0.0300         | 0.0265         | 11.74%
 ```
 src/utils/          # 工具模块（日志、辅助函数）
 scripts/
+  05_final.py               # 核心：10 维分阶段解耦标定系统
+  06_probe_mu_spin.py       # mu_spin 可观测性探针实验
   01_run_diagnosis.py       # 初始问题诊断
   01_sim_diagram.py         # 仿真流程图可视化
   02_optimize_solver.py     # 求解器优化
   03_system_id_*.py         # 参数辨识的不同尝试（baseline, var2, final）
-  04_10var.py               # 10 维参数标定（核心）
+  04_*.py                   # 10 维标定的历史版本
   inspect_robot.py          # 机械臂检查工具
 configs/            # 配置
 environment.yml     # Conda 环境

@@ -1,10 +1,15 @@
 """
-工业级 10 维物理动力学与接触隐藏参数 Sim-to-Sim 标定系统 (互相关锁定+交替优化版)
+工业级 10 维物理动力学与接触隐藏参数 Sim-to-Sim 标定系统 (分阶段解耦标定版)
 =====================================================================
-- 基于原始代码，仅增加：
-  1. 互相关法估计系统时延（sys_delay），避免优化器搜索
-  2. 两轮交替优化（Refine B, Refine C），消除参数代偿
-- 保持 Stage B 和 Stage C 原仿真方法不变
+10 参数分三组，按"干净信号"分阶段单独标定，避免参数代偿：
+- Stage A  空载扫频       → joint_damp
+- Stage M  静止腕力矩     → mass（静止腕力矩 ∝ mass 严格线性）
+- Stage B  落块冲击       → k_n, c_n（动态冲击暴露接触刚度/阻尼）
+- Stage C  抓取+旋转      → mu_lat, com_dx, com_dy
+- Stage D  抓取+旋转      → com_dz（与 mu_lat/com_xy 解耦）
+- Stage S  平面扭转衰减   → mu_spin（绕接触法线旋转，干净扭转摩擦信号）
+- Refine B / Refine C + Final Joint 交替精修
+- sys_delay 用互相关法直接估计（不参与优化）
 """
 
 import time
@@ -266,7 +271,7 @@ class RobotSimulator:
         return np.mean(torques, axis=0)
 
     # -----------------------------------------------------------------
-    # 场景 A：空载多频扫频与阶跃 (保持原样)
+    # 场景 A：空载多频扫频与阶跃 (解耦辨识 joint_damp)
     # -----------------------------------------------------------------
     def simulate_stage_A(self, params, duration=2.5):
         self.set_params(params)
@@ -390,6 +395,52 @@ class RobotSimulator:
                 nf = max([self._extract_force(c[9]) for c in contacts])
                 lat1 = max([self._extract_force(c[10]) for c in contacts])
                 lat2 = max([self._extract_force(c[12]) for c in contacts])  # 索引修正
+                contact_force_list.append([nf, lat1, lat2])
+            else:
+                contact_force_list.append([0.0, 0.0, 0.0])
+
+        return np.array(cube_pos_list), np.array(cube_orn_list), np.array(contact_force_list)
+
+    # -----------------------------------------------------------------
+    # 场景 D：纯 pitch 摆动 (正交解耦 com_dx ∝ cos pitch 与 com_dz ∝ sin pitch)
+    # -----------------------------------------------------------------
+    def simulate_stage_D(self, params, duration=1.0):
+        self.set_params(params)
+        steps = int(duration * 240)
+        times = np.linspace(0, duration, steps)
+
+        self._settle_grasp(hold_pos=(0.5, 0.0, 0.2), finger_target=0.020, finger_force=3.5, steps=50)
+
+        pitch = 0.8 * np.sin(2 * np.pi * 0.5 * times)  # 纯 pitch 摆动，roll/yaw 固定
+
+        cube_pos_list, cube_orn_list, contact_force_list = [], [], []
+
+        for i in range(steps):
+            orn = p.getQuaternionFromEuler([np.pi, pitch[i], 0.0])
+            cmd_j = p.calculateInverseKinematics(self.robot_id, self.EE_INDEX, [0.5, 0.0, 0.20], orn, maxNumIterations=100)
+
+            self._apply_action(cmd_j, finger_pos=0.020, finger_force=3.5, arm_force=150.0)
+
+            if self.use_external_torque_com:
+                pos, orn_cube = p.getBasePositionAndOrientation(self.cube_id)
+                rot_mat = np.array(p.getMatrixFromQuaternion(orn_cube)).reshape(3, 3)
+                local_com = np.array([params['com_dx'], params['com_dy'], params['com_dz']])
+                world_com_offset = rot_mat.dot(local_com)
+                gravity_force = np.array([0, 0, -9.81 * params['mass']])
+                world_torque = np.cross(world_com_offset, gravity_force)
+                p.applyExternalTorque(self.cube_id, -1, world_torque, p.WORLD_FRAME)
+
+            p.stepSimulation()
+
+            pos, orn_cube = p.getBasePositionAndOrientation(self.cube_id)
+            cube_pos_list.append([float(pos[0]), float(pos[1]), float(pos[2])])
+            cube_orn_list.append(list(map(float, p.getEulerFromQuaternion(orn_cube))))
+
+            contacts = p.getContactPoints(self.robot_id, self.cube_id)
+            if contacts:
+                nf = max([self._extract_force(c[9]) for c in contacts])
+                lat1 = max([self._extract_force(c[10]) for c in contacts])
+                lat2 = max([self._extract_force(c[12]) for c in contacts])
                 contact_force_list.append([nf, lat1, lat2])
             else:
                 contact_force_list.append([0.0, 0.0, 0.0])
@@ -591,11 +642,12 @@ def main():
         # -------------------------------------------------------------
         # Step 1b：生成 Stage B/C 真实数据（放在 Stage A 之后，避免落块实验污染 joint_damp 辨识）
         # -------------------------------------------------------------
-        print("\n📡 [Step 1b] 生成 Stage B/C/S 真实轨迹...")
+        print("\n📡 [Step 1b] 生成 Stage B/C/D/S 真实轨迹...")
         real_B = sim.simulate_stage_B(TRUE_PARAMS)
         real_C = sim.simulate_stage_C(TRUE_PARAMS)
+        real_D = sim.simulate_stage_D(TRUE_PARAMS)
         real_S = sim.simulate_stage_S(TRUE_PARAMS)
-        clean_data = {'A': real_A, 'B': real_B, 'C': real_C, 'S': real_S}
+        clean_data = {'A': real_A, 'B': real_B, 'C': real_C, 'D': real_D, 'S': real_S}
         real_B_noisy = (
             real_B[0] + np.random.normal(0, 1e-5, real_B[0].shape),
             real_B[1] + np.random.normal(0, 0.01, real_B[1].shape),
@@ -618,6 +670,16 @@ def main():
         }
         real_S_noisy = real_S + np.random.normal(0, 0.01, real_S.shape)
         scales_S = {'omega': np.var(real_S_noisy) + 1e-5}
+        real_D_noisy = (
+            real_D[0] + np.random.normal(0, 1e-5, real_D[0].shape),
+            real_D[1] + np.random.normal(0, 1e-5, real_D[1].shape),
+            real_D[2] + np.random.normal(0, 0.01, real_D[2].shape)
+        )
+        scales_D = {
+            'pos': np.var(real_D_noisy[0]) + 1e-5,
+            'orn': np.var(real_D_noisy[1]) + 1e-5,
+            'cf': np.var(real_D_noisy[2]) + 1e-5
+        }
 
         # -------------------------------------------------------------
         # Stage M：用静止腕力矩单独标定 mass（与 k_n/c_n 解耦）
@@ -637,7 +699,7 @@ def main():
         print(f"  --> 阶段 M 完成: mass={NOMINAL['mass']:.4f}")
 
         # -------------------------------------------------------------
-        # Stage B：辨识 mass, k_n, c_n (原方法)
+        # Stage B：落块冲击实验辨识 k_n, c_n (mass 已由 Stage M 固定)
         # -------------------------------------------------------------
         print("\n📘 [Stage B] 辨识接触参数: k_n, c_n (mass 已固定)...")
         def objective_B(trial):
@@ -657,10 +719,10 @@ def main():
         # -------------------------------------------------------------
         # Stage C：辨识摩擦与 xy 质心偏移 (mu_spin 稍后由 Stage S 标定)
         # -------------------------------------------------------------
-        print("\n📘 [Stage C] 辨识表面摩擦与 xy 质心偏移 (mu_lat, com_dx, com_dy)...")
+        print("\n📘 [Stage C] 辨识表面摩擦与 y 质心偏移 (mu_lat, com_dy)...")
         def objective_C(trial):
             p_dict = NOMINAL.copy()
-            for key in ['mu_lat', 'com_dx', 'com_dy']:
+            for key in ['mu_lat', 'com_dy']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_C = sim.simulate_stage_C(p_dict)
             com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
@@ -669,26 +731,28 @@ def main():
         study_C = optuna.create_study(sampler=make_sampler(30), direction="minimize")
         study_C.optimize(objective_C, n_trials=300, show_progress_bar=False)
         loss_history['Stage C'] = study_C.trials_dataframe()['value'].tolist()
-        for key in ['mu_lat', 'com_dx', 'com_dy']:
+        for key in ['mu_lat', 'com_dy']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C.best_params[key])
-        print(f"  --> 阶段 C 完成: mu_lat={NOMINAL['mu_lat']:.4f}, com_dx={NOMINAL['com_dx']:.4f}, com_dy={NOMINAL['com_dy']:.4f}")
+        print(f"  --> 阶段 C 完成: mu_lat={NOMINAL['mu_lat']:.4f}, com_dy={NOMINAL['com_dy']:.4f}")
 
         # -------------------------------------------------------------
-        # Stage D：用抓取旋转实验单独标 com_dz（与 mu_lat/com_dx/com_dy 解耦）
+        # Stage D：纯 pitch 摆动正交解耦 com_dx 与 com_dz
         # -------------------------------------------------------------
-        print("\n📘 [Stage D] 用抓取旋转实验单独标 com_dz...")
+        print("\n📘 [Stage D] 用纯 pitch 摆动标定 com_dx 与 com_dz...")
         def objective_D(trial):
             p_dict = NOMINAL.copy()
-            p_dict['com_dz'] = normalizer.norm_to_phys('com_dz', trial.suggest_float('com_dz', 0, 1))
-            sim_C = sim.simulate_stage_C(p_dict)
+            for key in ['com_dx', 'com_dz']:
+                p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
+            sim_D = sim.simulate_stage_D(p_dict)
             com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
-            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
+            return compute_loss_stage_C(sim_D, real_D_noisy, scales_D, com_xyz=com_xyz)
 
-        study_D = optuna.create_study(sampler=make_sampler(15), direction="minimize")
-        study_D.optimize(objective_D, n_trials=80, show_progress_bar=False)
+        study_D = optuna.create_study(sampler=make_sampler(20), direction="minimize")
+        study_D.optimize(objective_D, n_trials=150, show_progress_bar=False)
         loss_history['Stage D'] = study_D.trials_dataframe()['value'].tolist()
-        NOMINAL['com_dz'] = normalizer.norm_to_phys('com_dz', study_D.best_params['com_dz'])
-        print(f"  --> 阶段 D 完成: com_dz={NOMINAL['com_dz']:.4f}")
+        for key in ['com_dx', 'com_dz']:
+            NOMINAL[key] = normalizer.norm_to_phys(key, study_D.best_params[key])
+        print(f"  --> 阶段 D 完成: com_dx={NOMINAL['com_dx']:.4f}, com_dz={NOMINAL['com_dz']:.4f}")
 
         # -------------------------------------------------------------
         # Stage S：平面扭转衰减单独标定 mu_spin（在 mu_lat 标定后，避免摩擦耦合）
@@ -726,10 +790,10 @@ def main():
         # -------------------------------------------------------------
         # 🔧 第二轮精修：Refine C (固定质量与接触)
         # -------------------------------------------------------------
-        print("\n🔁 [Refine C] 精修 mu_lat, com_dx, com_dy (固定质量与接触)...")
+        print("\n🔁 [Refine C] 精修 mu_lat, com_dy (固定质量与接触)...")
         def objective_C_refine(trial):
             p_dict = NOMINAL.copy()
-            for key in ['mu_lat', 'com_dx', 'com_dy']:
+            for key in ['mu_lat', 'com_dy']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_C = sim.simulate_stage_C(p_dict)
             com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
@@ -738,17 +802,16 @@ def main():
         study_C_ref = optuna.create_study(sampler=make_sampler(30), direction="minimize")
         study_C_ref.optimize(objective_C_refine, n_trials=200, show_progress_bar=False)
         loss_history['Refine C'] = study_C_ref.trials_dataframe()['value'].tolist()
-        for key in ['mu_lat', 'com_dx', 'com_dy']:
+        for key in ['mu_lat', 'com_dy']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C_ref.best_params[key])
 
         # -------------------------------------------------------------
-        # 🔧 Final Joint：5 维联合优化（sys_delay / joint_damp / mass / mu_spin / com_dz 固定）
+        # 🔧 Final Joint：3 维联合优化（其余 7 参数已分阶段标定并固定）
         # -------------------------------------------------------------
-        print("\n🧩 [Final Joint] 5 维联合优化 (sys_delay / joint_damp / mass / mu_spin / com_dz 固定)...")
+        print("\n🧩 [Final Joint] 3 维联合优化 (k_n, c_n, com_dy)...")
         def objective_final(trial):
             p_dict = NOMINAL.copy()
-            for key in ['mu_lat', 'k_n', 'c_n',
-                        'com_dx', 'com_dy']:
+            for key in ['k_n', 'c_n', 'com_dy']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_A = sim.simulate_stage_A(p_dict)
             sim_B = sim.simulate_stage_B(p_dict)
@@ -759,11 +822,10 @@ def main():
             loss_C = compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
             return float(loss_A + loss_B + loss_C)
 
-        study_final = optuna.create_study(sampler=make_sampler(40), direction="minimize")
-        study_final.optimize(objective_final, n_trials=400, show_progress_bar=False)
+        study_final = optuna.create_study(sampler=make_sampler(30), direction="minimize")
+        study_final.optimize(objective_final, n_trials=300, show_progress_bar=False)
         loss_history['Final Joint'] = study_final.trials_dataframe()['value'].tolist()
-        for key in ['mu_lat', 'k_n', 'c_n',
-                    'com_dx', 'com_dy']:
+        for key in ['k_n', 'c_n', 'com_dy']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_final.best_params[key])
 
         # -------------------------------------------------------------
@@ -799,9 +861,13 @@ def main():
         scales_C_clean = {'pos': np.var(clean_data['C'][0]) + 1e-5,
                           'orn': np.var(clean_data['C'][1]) + 1e-5,
                           'cf': np.var(clean_data['C'][2]) + 1e-5}
+        scales_D_clean = {'pos': np.var(clean_data['D'][0]) + 1e-5,
+                          'orn': np.var(clean_data['D'][1]) + 1e-5,
+                          'cf': np.var(clean_data['D'][2]) + 1e-5}
         sim_A_eval = sim.simulate_stage_A(final_calibrated_params)
         sim_B_eval = sim.simulate_stage_B(final_calibrated_params)
         sim_C_eval = sim.simulate_stage_C(final_calibrated_params)
+        sim_D_eval = sim.simulate_stage_D(final_calibrated_params)
         sim_S_eval = sim.simulate_stage_S(final_calibrated_params)
         clean_loss_A = compute_loss_stage_A(sim_A_eval, clean_data['A'], scales_A_clean)
         clean_loss_B = compute_loss_stage_B(sim_B_eval, clean_data['B'], scales_B_clean)
@@ -809,9 +875,10 @@ def main():
                    final_calibrated_params['com_dy'],
                    final_calibrated_params['com_dz'])
         clean_loss_C = compute_loss_stage_C(sim_C_eval, clean_data['C'], scales_C_clean, com_xyz=com_xyz)
+        clean_loss_D = compute_loss_stage_C(sim_D_eval, clean_data['D'], scales_D_clean, com_xyz=com_xyz)
         clean_loss_S = compute_loss_stage_S(sim_S_eval, clean_data['S'], np.var(clean_data['S']) + 1e-5)
-        print(f"  干净数据损失  Stage A={clean_loss_A:.4f}  Stage B={clean_loss_B:.4f}  Stage C={clean_loss_C:.4f}  Stage S={clean_loss_S:.4f}")
-        print(f"  干净数据总损失 = {clean_loss_A + clean_loss_B + clean_loss_C + clean_loss_S:.4f}")
+        print(f"  干净数据损失  Stage A={clean_loss_A:.4f}  Stage B={clean_loss_B:.4f}  Stage C={clean_loss_C:.4f}  Stage D={clean_loss_D:.4f}  Stage S={clean_loss_S:.4f}")
+        print(f"  干净数据总损失 = {clean_loss_A + clean_loss_B + clean_loss_C + clean_loss_D + clean_loss_S:.4f}")
 
         # 绘图：显示所有阶段 loss 曲线
         fig, axes = plt.subplots(2, 5, figsize=(24, 10))
