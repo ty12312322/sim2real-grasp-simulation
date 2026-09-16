@@ -655,7 +655,43 @@ def main():
         print(f"  --> 阶段 B 完成: k_n={NOMINAL['k_n']:.1f}, c_n={NOMINAL['c_n']:.2f}")
 
         # -------------------------------------------------------------
-        # Stage S：平面扭转衰减单独标定 mu_spin（与夹持摩擦/质心解耦）
+        # Stage C：辨识摩擦与 xy 质心偏移 (mu_spin 稍后由 Stage S 标定)
+        # -------------------------------------------------------------
+        print("\n📘 [Stage C] 辨识表面摩擦与 xy 质心偏移 (mu_lat, com_dx, com_dy)...")
+        def objective_C(trial):
+            p_dict = NOMINAL.copy()
+            for key in ['mu_lat', 'com_dx', 'com_dy']:
+                p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
+            sim_C = sim.simulate_stage_C(p_dict)
+            com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
+            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
+
+        study_C = optuna.create_study(sampler=make_sampler(30), direction="minimize")
+        study_C.optimize(objective_C, n_trials=300, show_progress_bar=False)
+        loss_history['Stage C'] = study_C.trials_dataframe()['value'].tolist()
+        for key in ['mu_lat', 'com_dx', 'com_dy']:
+            NOMINAL[key] = normalizer.norm_to_phys(key, study_C.best_params[key])
+        print(f"  --> 阶段 C 完成: mu_lat={NOMINAL['mu_lat']:.4f}, com_dx={NOMINAL['com_dx']:.4f}, com_dy={NOMINAL['com_dy']:.4f}")
+
+        # -------------------------------------------------------------
+        # Stage D：用抓取旋转实验单独标 com_dz（与 mu_lat/com_dx/com_dy 解耦）
+        # -------------------------------------------------------------
+        print("\n📘 [Stage D] 用抓取旋转实验单独标 com_dz...")
+        def objective_D(trial):
+            p_dict = NOMINAL.copy()
+            p_dict['com_dz'] = normalizer.norm_to_phys('com_dz', trial.suggest_float('com_dz', 0, 1))
+            sim_C = sim.simulate_stage_C(p_dict)
+            com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
+            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
+
+        study_D = optuna.create_study(sampler=make_sampler(15), direction="minimize")
+        study_D.optimize(objective_D, n_trials=80, show_progress_bar=False)
+        loss_history['Stage D'] = study_D.trials_dataframe()['value'].tolist()
+        NOMINAL['com_dz'] = normalizer.norm_to_phys('com_dz', study_D.best_params['com_dz'])
+        print(f"  --> 阶段 D 完成: com_dz={NOMINAL['com_dz']:.4f}")
+
+        # -------------------------------------------------------------
+        # Stage S：平面扭转衰减单独标定 mu_spin（在 mu_lat 标定后，避免摩擦耦合）
         # -------------------------------------------------------------
         print("\n📘 [Stage S] 用平面扭转衰减标定 mu_spin...")
         def objective_S(trial):
@@ -669,25 +705,6 @@ def main():
         loss_history['Stage S'] = study_S.trials_dataframe()['value'].tolist()
         NOMINAL['mu_spin'] = normalizer.norm_to_phys('mu_spin', study_S.best_params['mu_spin'])
         print(f"  --> 阶段 S 完成: mu_spin={NOMINAL['mu_spin']:.4f}")
-
-        # -------------------------------------------------------------
-        # Stage C：辨识摩擦与质心偏移 (mu_spin 已由 Stage S 标定)
-        # -------------------------------------------------------------
-        print("\n📘 [Stage C] 辨识表面摩擦与 3D 质心偏移 (mu_lat, com_xyz)...")
-        def objective_C(trial):
-            p_dict = NOMINAL.copy()
-            for key in ['mu_lat', 'com_dx', 'com_dy', 'com_dz']:
-                p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
-            sim_C = sim.simulate_stage_C(p_dict)
-            com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
-            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
-
-        study_C = optuna.create_study(sampler=make_sampler(30), direction="minimize")
-        study_C.optimize(objective_C, n_trials=300, show_progress_bar=False)
-        loss_history['Stage C'] = study_C.trials_dataframe()['value'].tolist()
-        for key in ['mu_lat', 'com_dx', 'com_dy', 'com_dz']:
-            NOMINAL[key] = normalizer.norm_to_phys(key, study_C.best_params[key])
-        print(f"  --> 阶段 C 完成: mu_lat={NOMINAL['mu_lat']:.4f}, com_dz={NOMINAL['com_dz']:.4f}")
 
         # -------------------------------------------------------------
         # 🔧 第二轮精修：Refine B (固定摩擦与质心)
@@ -709,10 +726,10 @@ def main():
         # -------------------------------------------------------------
         # 🔧 第二轮精修：Refine C (固定质量与接触)
         # -------------------------------------------------------------
-        print("\n🔁 [Refine C] 精修 mu_lat, com_xyz (固定质量与接触)...")
+        print("\n🔁 [Refine C] 精修 mu_lat, com_dx, com_dy (固定质量与接触)...")
         def objective_C_refine(trial):
             p_dict = NOMINAL.copy()
-            for key in ['mu_lat', 'com_dx', 'com_dy', 'com_dz']:
+            for key in ['mu_lat', 'com_dx', 'com_dy']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_C = sim.simulate_stage_C(p_dict)
             com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
@@ -721,17 +738,17 @@ def main():
         study_C_ref = optuna.create_study(sampler=make_sampler(30), direction="minimize")
         study_C_ref.optimize(objective_C_refine, n_trials=200, show_progress_bar=False)
         loss_history['Refine C'] = study_C_ref.trials_dataframe()['value'].tolist()
-        for key in ['mu_lat', 'com_dx', 'com_dy', 'com_dz']:
+        for key in ['mu_lat', 'com_dx', 'com_dy']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C_ref.best_params[key])
 
         # -------------------------------------------------------------
-        # 🔧 Final Joint：6 维联合优化（sys_delay / joint_damp / mass / mu_spin 固定）
+        # 🔧 Final Joint：5 维联合优化（sys_delay / joint_damp / mass / mu_spin / com_dz 固定）
         # -------------------------------------------------------------
-        print("\n🧩 [Final Joint] 6 维联合优化 (sys_delay / joint_damp / mass / mu_spin 固定)...")
+        print("\n🧩 [Final Joint] 5 维联合优化 (sys_delay / joint_damp / mass / mu_spin / com_dz 固定)...")
         def objective_final(trial):
             p_dict = NOMINAL.copy()
             for key in ['mu_lat', 'k_n', 'c_n',
-                        'com_dx', 'com_dy', 'com_dz']:
+                        'com_dx', 'com_dy']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_A = sim.simulate_stage_A(p_dict)
             sim_B = sim.simulate_stage_B(p_dict)
@@ -746,7 +763,7 @@ def main():
         study_final.optimize(objective_final, n_trials=400, show_progress_bar=False)
         loss_history['Final Joint'] = study_final.trials_dataframe()['value'].tolist()
         for key in ['mu_lat', 'k_n', 'c_n',
-                    'com_dx', 'com_dy', 'com_dz']:
+                    'com_dx', 'com_dy']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_final.best_params[key])
 
         # -------------------------------------------------------------
@@ -797,11 +814,11 @@ def main():
         print(f"  干净数据总损失 = {clean_loss_A + clean_loss_B + clean_loss_C + clean_loss_S:.4f}")
 
         # 绘图：显示所有阶段 loss 曲线
-        fig, axes = plt.subplots(3, 3, figsize=(20, 14))
+        fig, axes = plt.subplots(2, 5, figsize=(24, 10))
         axes = axes.flatten()
-        stage_titles = ['Stage A', 'Stage M', 'Stage B', 'Stage S', 'Stage C', 'Refine B', 'Refine C', 'Final Joint', 'All Stages']
-        keys = ['Stage A', 'Stage M', 'Stage B', 'Stage S', 'Stage C', 'Refine B', 'Refine C', 'Final Joint']
-        colors = ['#1f77b4', '#17becf', '#ff7f0e', '#e377c2', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+        stage_titles = ['Stage A', 'Stage M', 'Stage B', 'Stage C', 'Stage D', 'Stage S', 'Refine B', 'Refine C', 'Final Joint', 'All Stages']
+        keys = ['Stage A', 'Stage M', 'Stage B', 'Stage C', 'Stage D', 'Stage S', 'Refine B', 'Refine C', 'Final Joint']
+        colors = ['#1f77b4', '#17becf', '#ff7f0e', '#2ca02c', '#bcbd22', '#e377c2', '#d62728', '#9467bd', '#8c564b']
         for idx, key in enumerate(keys):
             ax = axes[idx]
             losses = loss_history[key]
@@ -813,7 +830,7 @@ def main():
             ax.grid(True, which='both', linestyle='--', alpha=0.5)
             ax.legend()
         # 最后一个子图：所有曲线
-        ax = axes[8]
+        ax = axes[9]
         for key, color in zip(keys, colors):
             ax.plot(loss_history[key], color=color, lw=1.5, label=key)
         ax.set_title("All Stages", fontsize=12, fontweight='bold')
