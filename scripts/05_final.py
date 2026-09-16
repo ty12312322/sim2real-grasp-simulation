@@ -642,12 +642,11 @@ def main():
         # -------------------------------------------------------------
         # Step 1b：生成 Stage B/C 真实数据（放在 Stage A 之后，避免落块实验污染 joint_damp 辨识）
         # -------------------------------------------------------------
-        print("\n📡 [Step 1b] 生成 Stage B/C/D/S 真实轨迹...")
+        print("\n📡 [Step 1b] 生成 Stage B/C/S 真实轨迹...")
         real_B = sim.simulate_stage_B(TRUE_PARAMS)
         real_C = sim.simulate_stage_C(TRUE_PARAMS)
-        real_D = sim.simulate_stage_D(TRUE_PARAMS)
         real_S = sim.simulate_stage_S(TRUE_PARAMS)
-        clean_data = {'A': real_A, 'B': real_B, 'C': real_C, 'D': real_D, 'S': real_S}
+        clean_data = {'A': real_A, 'B': real_B, 'C': real_C, 'S': real_S}
         real_B_noisy = (
             real_B[0] + np.random.normal(0, 1e-5, real_B[0].shape),
             real_B[1] + np.random.normal(0, 0.01, real_B[1].shape),
@@ -670,16 +669,6 @@ def main():
         }
         real_S_noisy = real_S + np.random.normal(0, 0.01, real_S.shape)
         scales_S = {'omega': np.var(real_S_noisy) + 1e-5}
-        real_D_noisy = (
-            real_D[0] + np.random.normal(0, 1e-5, real_D[0].shape),
-            real_D[1] + np.random.normal(0, 1e-5, real_D[1].shape),
-            real_D[2] + np.random.normal(0, 0.01, real_D[2].shape)
-        )
-        scales_D = {
-            'pos': np.var(real_D_noisy[0]) + 1e-5,
-            'orn': np.var(real_D_noisy[1]) + 1e-5,
-            'cf': np.var(real_D_noisy[2]) + 1e-5
-        }
 
         # -------------------------------------------------------------
         # Stage M：用静止腕力矩单独标定 mass（与 k_n/c_n 解耦）
@@ -719,10 +708,10 @@ def main():
         # -------------------------------------------------------------
         # Stage C：辨识摩擦与 xy 质心偏移 (mu_spin 稍后由 Stage S 标定)
         # -------------------------------------------------------------
-        print("\n📘 [Stage C] 辨识表面摩擦与 y 质心偏移 (mu_lat, com_dy)...")
+        print("\n📘 [Stage C] 辨识表面摩擦与 xy 质心偏移 (mu_lat, com_dx, com_dy)...")
         def objective_C(trial):
             p_dict = NOMINAL.copy()
-            for key in ['mu_lat', 'com_dy']:
+            for key in ['mu_lat', 'com_dx', 'com_dy']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_C = sim.simulate_stage_C(p_dict)
             com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
@@ -731,28 +720,26 @@ def main():
         study_C = optuna.create_study(sampler=make_sampler(30), direction="minimize")
         study_C.optimize(objective_C, n_trials=300, show_progress_bar=False)
         loss_history['Stage C'] = study_C.trials_dataframe()['value'].tolist()
-        for key in ['mu_lat', 'com_dy']:
+        for key in ['mu_lat', 'com_dx', 'com_dy']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C.best_params[key])
-        print(f"  --> 阶段 C 完成: mu_lat={NOMINAL['mu_lat']:.4f}, com_dy={NOMINAL['com_dy']:.4f}")
+        print(f"  --> 阶段 C 完成: mu_lat={NOMINAL['mu_lat']:.4f}, com_dx={NOMINAL['com_dx']:.4f}, com_dy={NOMINAL['com_dy']:.4f}")
 
         # -------------------------------------------------------------
-        # Stage D：纯 pitch 摆动正交解耦 com_dx 与 com_dz
+        # Stage D：单独标 com_dz（本质难标：2mm 偏移 + 与 mu_lat 摩擦强耦合）
         # -------------------------------------------------------------
-        print("\n📘 [Stage D] 用纯 pitch 摆动标定 com_dx 与 com_dz...")
+        print("\n📘 [Stage D] 用抓取旋转实验单独标 com_dz...")
         def objective_D(trial):
             p_dict = NOMINAL.copy()
-            for key in ['com_dx', 'com_dz']:
-                p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
-            sim_D = sim.simulate_stage_D(p_dict)
+            p_dict['com_dz'] = normalizer.norm_to_phys('com_dz', trial.suggest_float('com_dz', 0, 1))
+            sim_C = sim.simulate_stage_C(p_dict)
             com_xyz = (p_dict['com_dx'], p_dict['com_dy'], p_dict['com_dz'])
-            return compute_loss_stage_C(sim_D, real_D_noisy, scales_D, com_xyz=com_xyz)
+            return compute_loss_stage_C(sim_C, real_C_noisy, scales_C, com_xyz=com_xyz)
 
-        study_D = optuna.create_study(sampler=make_sampler(20), direction="minimize")
-        study_D.optimize(objective_D, n_trials=150, show_progress_bar=False)
+        study_D = optuna.create_study(sampler=make_sampler(15), direction="minimize")
+        study_D.optimize(objective_D, n_trials=80, show_progress_bar=False)
         loss_history['Stage D'] = study_D.trials_dataframe()['value'].tolist()
-        for key in ['com_dx', 'com_dz']:
-            NOMINAL[key] = normalizer.norm_to_phys(key, study_D.best_params[key])
-        print(f"  --> 阶段 D 完成: com_dx={NOMINAL['com_dx']:.4f}, com_dz={NOMINAL['com_dz']:.4f}")
+        NOMINAL['com_dz'] = normalizer.norm_to_phys('com_dz', study_D.best_params['com_dz'])
+        print(f"  --> 阶段 D 完成: com_dz={NOMINAL['com_dz']:.4f}")
 
         # -------------------------------------------------------------
         # Stage S：平面扭转衰减单独标定 mu_spin（在 mu_lat 标定后，避免摩擦耦合）
@@ -806,12 +793,12 @@ def main():
             NOMINAL[key] = normalizer.norm_to_phys(key, study_C_ref.best_params[key])
 
         # -------------------------------------------------------------
-        # 🔧 Final Joint：3 维联合优化（其余 7 参数已分阶段标定并固定）
+        # 🔧 Final Joint：4 维联合优化（mu_lat/com_dz 固定，避免代偿）
         # -------------------------------------------------------------
-        print("\n🧩 [Final Joint] 3 维联合优化 (k_n, c_n, com_dy)...")
+        print("\n🧩 [Final Joint] 4 维联合优化 (k_n, c_n, com_dx, com_dy)...")
         def objective_final(trial):
             p_dict = NOMINAL.copy()
-            for key in ['k_n', 'c_n', 'com_dy']:
+            for key in ['k_n', 'c_n', 'com_dx', 'com_dy']:
                 p_dict[key] = normalizer.norm_to_phys(key, trial.suggest_float(key, 0, 1))
             sim_A = sim.simulate_stage_A(p_dict)
             sim_B = sim.simulate_stage_B(p_dict)
@@ -825,7 +812,7 @@ def main():
         study_final = optuna.create_study(sampler=make_sampler(30), direction="minimize")
         study_final.optimize(objective_final, n_trials=300, show_progress_bar=False)
         loss_history['Final Joint'] = study_final.trials_dataframe()['value'].tolist()
-        for key in ['k_n', 'c_n', 'com_dy']:
+        for key in ['k_n', 'c_n', 'com_dx', 'com_dy']:
             NOMINAL[key] = normalizer.norm_to_phys(key, study_final.best_params[key])
 
         # -------------------------------------------------------------
@@ -861,13 +848,9 @@ def main():
         scales_C_clean = {'pos': np.var(clean_data['C'][0]) + 1e-5,
                           'orn': np.var(clean_data['C'][1]) + 1e-5,
                           'cf': np.var(clean_data['C'][2]) + 1e-5}
-        scales_D_clean = {'pos': np.var(clean_data['D'][0]) + 1e-5,
-                          'orn': np.var(clean_data['D'][1]) + 1e-5,
-                          'cf': np.var(clean_data['D'][2]) + 1e-5}
         sim_A_eval = sim.simulate_stage_A(final_calibrated_params)
         sim_B_eval = sim.simulate_stage_B(final_calibrated_params)
         sim_C_eval = sim.simulate_stage_C(final_calibrated_params)
-        sim_D_eval = sim.simulate_stage_D(final_calibrated_params)
         sim_S_eval = sim.simulate_stage_S(final_calibrated_params)
         clean_loss_A = compute_loss_stage_A(sim_A_eval, clean_data['A'], scales_A_clean)
         clean_loss_B = compute_loss_stage_B(sim_B_eval, clean_data['B'], scales_B_clean)
@@ -875,10 +858,9 @@ def main():
                    final_calibrated_params['com_dy'],
                    final_calibrated_params['com_dz'])
         clean_loss_C = compute_loss_stage_C(sim_C_eval, clean_data['C'], scales_C_clean, com_xyz=com_xyz)
-        clean_loss_D = compute_loss_stage_C(sim_D_eval, clean_data['D'], scales_D_clean, com_xyz=com_xyz)
         clean_loss_S = compute_loss_stage_S(sim_S_eval, clean_data['S'], np.var(clean_data['S']) + 1e-5)
-        print(f"  干净数据损失  Stage A={clean_loss_A:.4f}  Stage B={clean_loss_B:.4f}  Stage C={clean_loss_C:.4f}  Stage D={clean_loss_D:.4f}  Stage S={clean_loss_S:.4f}")
-        print(f"  干净数据总损失 = {clean_loss_A + clean_loss_B + clean_loss_C + clean_loss_D + clean_loss_S:.4f}")
+        print(f"  干净数据损失  Stage A={clean_loss_A:.4f}  Stage B={clean_loss_B:.4f}  Stage C={clean_loss_C:.4f}  Stage S={clean_loss_S:.4f}")
+        print(f"  干净数据总损失 = {clean_loss_A + clean_loss_B + clean_loss_C + clean_loss_S:.4f}")
 
         # 绘图：显示所有阶段 loss 曲线
         fig, axes = plt.subplots(2, 5, figsize=(24, 10))
